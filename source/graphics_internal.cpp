@@ -406,8 +406,13 @@ bool initialize(GLFWwindow* const window) {
 
 	vkb::PhysicalDeviceSelector pds(vkb_instance, vk_surface);
 
+	const VkPhysicalDeviceFeatures required_features = {
+		.fillModeNonSolid = VK_TRUE,
+	};
+
 	auto pds_result = pds.prefer_gpu_device_type(vkb::PreferredDeviceType::discrete)
 						 .require_present()
+						 .set_required_features(required_features)
 						 .select();
 	if (!pds_result) {
 		std::cerr << pds_result.error().message() << '\n';
