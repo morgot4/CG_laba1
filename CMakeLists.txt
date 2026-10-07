@@ -8,7 +8,7 @@ add_executable(${PROJECT_NAME} source/main.cpp source/graphics_internal.cpp sour
 if(LINUX)
 	target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
 elseif(APPLE)
-	target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wno-missing-field-initializers)
+	target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wno-missing-field-initializers -Wno-nullability-completeness)
 elseif(WIN32)
 	if(MSVC)
 		target_compile_options(${PROJECT_NAME} PRIVATE /W4 /wd4201)
