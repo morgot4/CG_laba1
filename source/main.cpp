@@ -17,7 +17,7 @@ namespace {
 constexpr int32_t default_window_width = 1280;
 constexpr int32_t default_window_height = 720;
 
-constexpr char default_window_title[] = "Lab 1: Sphere";
+constexpr char default_window_title[] = "Lab 2: Camera and Lighting";
 
 GLFWwindow* glfw_window;
 
@@ -99,5 +99,5 @@ err_imgui_init:
 err_null_window:
 	glfwTerminate();
 
-	return 0;
+	return status;
 }

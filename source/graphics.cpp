@@ -66,7 +66,7 @@ VkShaderModule createShaderModule(const char* path) {
 }
 
 VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
-                          VkShaderModule fragment_shader, VkPolygonMode polygon_mode) {
+                          VkShaderModule fragment_shader, VkPolygonMode polygon_mode, VkPrimitiveTopology topology) {
 	const VkPipelineShaderStageCreateInfo stages[2] = {
 		{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -88,7 +88,7 @@ VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
 		.inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
 	};
 
-	const VkVertexInputAttributeDescription vertex_attributes[2] = {
+	const VkVertexInputAttributeDescription vertex_attributes[3] = {
 		{
 			.location = 0,
 			.binding = 0,
@@ -101,19 +101,25 @@ VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
 			.format = VK_FORMAT_R32G32B32_SFLOAT,
 			.offset = 3 * sizeof(float),
 		},
+		{
+			.location = 2,
+			.binding = 0,
+			.format = VK_FORMAT_R32G32B32_SFLOAT,
+			.offset = 6 * sizeof(float),
+		},
 	};
 
 	const VkPipelineVertexInputStateCreateInfo vertex_input = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 		.vertexBindingDescriptionCount = 1,
 		.pVertexBindingDescriptions = &vertex_binding,
-		.vertexAttributeDescriptionCount = 2,
+		.vertexAttributeDescriptionCount = 3,
 		.pVertexAttributeDescriptions = vertex_attributes,
 	};
 
 	const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-		.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+		.topology = topology,
 	};
 
 	const VkPipelineViewportStateCreateInfo viewport_state = {
@@ -125,7 +131,7 @@ VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
 	const VkPipelineRasterizationStateCreateInfo rasterization = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
 		.polygonMode = polygon_mode,
-		.cullMode = VK_CULL_MODE_BACK_BIT,
+		.cullMode = topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT,
 		.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
 		.lineWidth = 1.0f,
 	};

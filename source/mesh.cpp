@@ -18,6 +18,7 @@ Mesh createSphereMesh(int stacks, int slices) {
 			vertex.position[2] = std::sin(theta) * std::sin(phi);
 			for (int k = 0; k < 3; k++) {
 				vertex.color[k] = vertex.position[k] * 0.5f + 0.5f;
+				vertex.normal[k] = vertex.position[k];
 			}
 			mesh.vertices.push_back(vertex);
 		}

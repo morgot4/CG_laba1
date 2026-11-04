@@ -115,6 +115,8 @@ if(GLSLC_FOUND)
 
 	compile_shader(sphere.vert)
 	compile_shader(sphere.frag)
+	compile_shader(marker.vert)
+	compile_shader(marker.frag)
 
 	add_custom_target(shaders DEPENDS ${_SHADER_BINARIES})
 	add_dependencies(${PROJECT_NAME} shaders)

@@ -16,6 +16,7 @@ void destroyBuffer(Buffer buffer);
 VkShaderModule createShaderModule(const char* path);
 
 VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
-                          VkShaderModule fragment_shader, VkPolygonMode polygon_mode);
+                          VkShaderModule fragment_shader, VkPolygonMode polygon_mode,
+                          VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
 
 }
