@@ -12,14 +12,15 @@ Mesh createSphereMesh(int stacks, int slices) {
 		for (int j = 0; j <= slices; j++) {
 			float phi = 2.0f * pi * j / slices;
 
-			Vertex vertex;
+			Vertex vertex = {};
 			vertex.position[0] = std::sin(theta) * std::cos(phi);
 			vertex.position[1] = std::cos(theta);
 			vertex.position[2] = std::sin(theta) * std::sin(phi);
 			for (int k = 0; k < 3; k++) {
-				vertex.color[k] = vertex.position[k] * 0.5f + 0.5f;
 				vertex.normal[k] = vertex.position[k];
 			}
+			vertex.uv[0] = (float)j / slices;
+			vertex.uv[1] = (float)i / stacks;
 			mesh.vertices.push_back(vertex);
 		}
 	}

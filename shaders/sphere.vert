@@ -10,24 +10,23 @@ layout(set = 0, binding = 0) uniform Scene {
     ivec4 light_counts;
 } scene;
 
-layout(set = 1, binding = 0) uniform Object {
+layout(std140, set = 1, binding = 0) uniform Object {
     mat4 model;
     vec4 albedo;
     vec4 specular_shininess;
-    vec4 options;
 } object;
 
 layout(location = 0) in vec3 in_position;
-layout(location = 1) in vec3 in_color;
-layout(location = 2) in vec3 in_normal;
+layout(location = 1) in vec3 in_normal;
+layout(location = 2) in vec2 in_uv;
 layout(location = 0) out vec3 world_position;
 layout(location = 1) out vec3 world_normal;
-layout(location = 2) out vec3 vertex_color;
+layout(location = 2) out vec2 texture_uv;
 
 void main() {
     vec4 world = object.model * vec4(in_position, 1.0);
     gl_Position = scene.view_projection * world;
     world_position = world.xyz;
     world_normal = transpose(inverse(mat3(object.model))) * in_normal;
-    vertex_color = mix(vec3(1.0), in_color, object.options.x);
+    texture_uv = in_uv;
 }

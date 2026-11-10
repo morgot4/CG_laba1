@@ -6,12 +6,14 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <cstddef>
 
 #include <imgui.h>
 
 #include "graphics.hpp"
 #include "math3d.hpp"
 #include "mesh.hpp"
+#include "materials.hpp"
 
 namespace application {
 
@@ -22,19 +24,11 @@ const int sphere_stacks = 32;
 const int sphere_slices = 32;
 
 const float default_positions[max_objects][3] = {
+	{ -2.2f, 0.0f, 0.0f },
 	{ 0.0f, 0.0f, 0.0f },
-	{ 3.0f, 0.0f, 0.0f },
-	{ -3.0f, 0.0f, 0.0f },
+	{ 2.2f, 0.0f, 0.0f },
 	{ 0.0f, 0.0f, -3.0f },
 	{ 0.0f, 0.0f, 3.0f },
-};
-
-const float default_colors[max_objects][3] = {
-	{ 1.0f, 1.0f, 1.0f },
-	{ 1.0f, 0.5f, 0.5f },
-	{ 0.5f, 1.0f, 0.5f },
-	{ 0.5f, 0.6f, 1.0f },
-	{ 1.0f, 0.9f, 0.4f },
 };
 
 struct SceneObject {
@@ -44,7 +38,14 @@ struct SceneObject {
 	float color[3];
 	float specular[3];
 	float shininess;
-	bool use_vertex_colors;
+	int material;
+	float uv_scale[2];
+	bool sampling_enabled;
+	bool sampling_playing;
+	float sampling_time;
+	float sampling_speed;
+	float sampling_strength;
+	float emission_strength;
 	bool animation_playing;
 	float animation_time;
 	float animation_speed;
@@ -68,7 +69,15 @@ struct alignas(16) ObjectUniforms {
 	Mat4 model;
 	float albedo[4];
 	float specular_shininess[4];
-	float options[4];
+};
+
+struct SamplingPush {
+	float uv_scale[2];
+	float time;
+	float strength;
+	int32_t enabled;
+	float emission_strength;
+	float padding[2];
 };
 
 struct alignas(16) PointLight {
@@ -89,13 +98,16 @@ struct MarkerPush {
 };
 
 static_assert(sizeof(SceneUniforms) == 160);
-static_assert(sizeof(ObjectUniforms) == 112);
+static_assert(sizeof(ObjectUniforms) == 96);
+static_assert(sizeof(SamplingPush) == 32);
+static_assert(offsetof(SamplingPush, enabled) == 16);
+static_assert(offsetof(SamplingPush, emission_strength) == 20);
 static_assert(sizeof(PointLight) == 32);
 static_assert(sizeof(SpotLight) == 64);
 
 SceneObject objects[max_objects];
 ObjectUniforms object_uniforms[max_objects];
-int object_count = 1;
+int object_count = 3;
 int selected_object = 0;
 
 bool use_perspective = true;
@@ -105,7 +117,7 @@ float orthographic_size = 3.0f;
 float near_plane = 0.1f;
 float far_plane = 100.0f;
 
-float camera_position[3] = { 0.0f, 0.0f, 6.0f };
+float camera_position[3] = { 0.0f, 0.0f, 7.5f };
 float camera_yaw = 0.0f;
 float camera_pitch = 0.0f;
 float ambient_color[3] = { 1.0f, 1.0f, 1.0f };
@@ -125,23 +137,26 @@ graphics::Buffer vertex_buffer;
 graphics::Buffer index_buffer;
 uint32_t vertex_count;
 uint32_t index_count;
-graphics::Buffer uniform_buffers[max_objects];
+graphics::Buffer model_buffer;
+VkDeviceSize model_stride;
 
 graphics::Buffer scene_buffer;
 graphics::Buffer point_buffer;
 graphics::Buffer spot_buffer;
 graphics::Buffer cone_buffer;
+graphics::Buffer cone_staging;
 size_t point_capacity = 0;
 size_t spot_capacity = 0;
 size_t cone_capacity = 0;
+size_t cone_staging_capacity = 0;
 uint32_t cone_vertex_count = 0;
 VkDescriptorSetLayout scene_set_layout;
 VkDescriptorSetLayout descriptor_set_layout;
 VkDescriptorSet scene_set;
 VkDescriptorPool descriptor_pool;
-VkDescriptorSet descriptor_sets[max_objects];
 
 VkPipelineLayout pipeline_layout;
+VkPipelineLayout marker_pipeline_layout;
 VkPipeline fill_pipeline;
 VkPipeline wireframe_pipeline;
 VkPipeline marker_pipeline;
@@ -153,11 +168,18 @@ void resetObject(int index) {
 		object.position[k] = default_positions[index][k];
 		object.rotation[k] = 0.0f;
 		object.scale[k] = 1.0f;
-		object.color[k] = default_colors[index][k];
+		object.color[k] = 1.0f;
 		object.specular[k] = 1.0f;
 	}
 	object.shininess = 32.0f;
-	object.use_vertex_colors = false;
+	object.material = index % materials::count;
+	object.uv_scale[0] = object.uv_scale[1] = 1.0f;
+	object.sampling_enabled = index == 2;
+	object.sampling_playing = true;
+	object.sampling_time = 0.0f;
+	object.sampling_speed = 1.0f;
+	object.sampling_strength = 1.0f;
+	object.emission_strength = 1.5f;
 	object.animation_playing = false;
 	object.animation_time = 0.0f;
 	object.animation_speed = 1.0f;
@@ -177,28 +199,28 @@ bool createSphereBuffers() {
 	VkDeviceSize vertices_size = sphere.vertices.size() * sizeof(Vertex);
 	VkDeviceSize indices_size = sphere.indices.size() * sizeof(uint32_t);
 
-	vertex_buffer = graphics::createBuffer(vertices_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-	index_buffer = graphics::createBuffer(indices_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+	vertex_buffer = graphics::createDeviceBuffer(sphere.vertices.data(), vertices_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+	index_buffer = graphics::createDeviceBuffer(sphere.indices.data(), indices_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 	if (vertex_buffer.buffer == VK_NULL_HANDLE || index_buffer.buffer == VK_NULL_HANDLE) {
 		return false;
 	}
 
-	graphics::uploadToBuffer(vertex_buffer, sphere.vertices.data(), vertices_size);
-	graphics::uploadToBuffer(index_buffer, sphere.indices.data(), indices_size);
 	return true;
 }
 
 bool createUniformBuffers() {
+	VkPhysicalDeviceProperties properties;
+	vkGetPhysicalDeviceProperties(graphics::internal::context.physical_device, &properties);
+	VkDeviceSize alignment = properties.limits.minUniformBufferOffsetAlignment;
+	model_stride = (sizeof(ObjectUniforms) + alignment - 1) / alignment * alignment;
+	model_buffer = graphics::createBuffer(model_stride * max_objects, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+	std::cout << "Dynamic model UBO: record=" << sizeof(ObjectUniforms) << ", alignment=" << alignment
+	          << ", stride=" << model_stride << ", total=" << model_stride * max_objects << '\n';
 	scene_buffer = graphics::createBuffer(sizeof(SceneUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
 	point_buffer = graphics::createBuffer(sizeof(PointLight), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	spot_buffer = graphics::createBuffer(sizeof(SpotLight), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	point_capacity = spot_capacity = 1;
-	if (!scene_buffer.buffer || !point_buffer.buffer || !spot_buffer.buffer) return false;
-	for (int i = 0; i < max_objects; i++) {
-		uniform_buffers[i] = graphics::createBuffer(sizeof(ObjectUniforms), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-		if (!uniform_buffers[i].buffer) return false;
-	}
-	return true;
+	return model_buffer.buffer && scene_buffer.buffer && point_buffer.buffer && spot_buffer.buffer;
 }
 
 bool createDescriptorSetLayout() {
@@ -213,24 +235,29 @@ bool createDescriptorSetLayout() {
 	};
 	VkDevice device = graphics::internal::context.device;
 	if (vkCreateDescriptorSetLayout(device, &scene_info, nullptr, &scene_set_layout) != VK_SUCCESS) return false;
-	const VkDescriptorSetLayoutBinding object_binding = {
-		0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr,
+	const VkDescriptorSetLayoutBinding object_bindings[] = {
+		{ 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ 3, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
 	};
 	const VkDescriptorSetLayoutCreateInfo object_info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-		.bindingCount = 1, .pBindings = &object_binding,
+		.bindingCount = 4, .pBindings = object_bindings,
 	};
 	return vkCreateDescriptorSetLayout(device, &object_info, nullptr, &descriptor_set_layout) == VK_SUCCESS;
 }
 
 bool createDescriptorPool() {
 	const VkDescriptorPoolSize sizes[] = {
-		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, max_objects + 1 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, materials::count },
+		{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 * materials::count },
 		{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 },
 	};
 	const VkDescriptorPoolCreateInfo info = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-		.maxSets = max_objects + 1, .poolSizeCount = 2, .pPoolSizes = sizes,
+		.maxSets = materials::count + 1, .poolSizeCount = 4, .pPoolSizes = sizes,
 	};
 	return vkCreateDescriptorPool(graphics::internal::context.device, &info, nullptr, &descriptor_pool) == VK_SUCCESS;
 }
@@ -258,22 +285,27 @@ bool createDescriptorSets() {
 	writeBufferDescriptor(scene_set, 0, scene_buffer, sizeof(SceneUniforms), VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
 	writeBufferDescriptor(scene_set, 1, point_buffer, sizeof(PointLight), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 	writeBufferDescriptor(scene_set, 2, spot_buffer, sizeof(SpotLight), VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-	for (int i = 0; i < max_objects; i++) {
-		if (!allocateSet(descriptor_set_layout, &descriptor_sets[i])) return false;
-		writeBufferDescriptor(descriptor_sets[i], 0, uniform_buffers[i], sizeof(ObjectUniforms), VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
-	}
-	return true;
+	return materials::createDescriptorSets(descriptor_pool, descriptor_set_layout, model_buffer, sizeof(ObjectUniforms));
 }
 
 bool createPipelines() {
 	VkDevice device = graphics::internal::context.device;
 	const VkDescriptorSetLayout layouts[] = { scene_set_layout, descriptor_set_layout };
-	const VkPushConstantRange push_range = { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MarkerPush) };
+	const VkPushConstantRange push_range = { VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(SamplingPush) };
 	const VkPipelineLayoutCreateInfo info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.setLayoutCount = 2, .pSetLayouts = layouts, .pushConstantRangeCount = 1, .pPushConstantRanges = &push_range,
 	};
 	if (vkCreatePipelineLayout(device, &info, nullptr, &pipeline_layout) != VK_SUCCESS) return false;
+	const VkPushConstantRange marker_range = {
+		VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MarkerPush),
+	};
+	const VkPipelineLayoutCreateInfo marker_info = {
+		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+		.setLayoutCount = 1, .pSetLayouts = &scene_set_layout,
+		.pushConstantRangeCount = 1, .pPushConstantRanges = &marker_range,
+	};
+	if (vkCreatePipelineLayout(device, &marker_info, nullptr, &marker_pipeline_layout) != VK_SUCCESS) return false;
 	VkShaderModule vertex = graphics::createShaderModule("shaders/sphere.vert.spv");
 	VkShaderModule fragment = graphics::createShaderModule("shaders/sphere.frag.spv");
 	VkShaderModule marker_vertex = graphics::createShaderModule("shaders/marker.vert.spv");
@@ -283,9 +315,10 @@ bool createPipelines() {
 		wireframe_pipeline = graphics::createPipeline(pipeline_layout, vertex, fragment, VK_POLYGON_MODE_LINE);
 	}
 	if (marker_vertex && marker_fragment) {
-		marker_pipeline = graphics::createPipeline(pipeline_layout, marker_vertex, marker_fragment, VK_POLYGON_MODE_FILL);
-		cone_pipeline = graphics::createPipeline(pipeline_layout, marker_vertex, marker_fragment, VK_POLYGON_MODE_FILL,
-		                                         VK_PRIMITIVE_TOPOLOGY_LINE_LIST);
+		marker_pipeline = graphics::createPipeline(marker_pipeline_layout, marker_vertex, marker_fragment, VK_POLYGON_MODE_FILL,
+		                                           VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, true);
+		cone_pipeline = graphics::createPipeline(marker_pipeline_layout, marker_vertex, marker_fragment, VK_POLYGON_MODE_FILL,
+		                                         VK_PRIMITIVE_TOPOLOGY_LINE_LIST, true);
 	}
 	vkDestroyShaderModule(device, vertex, nullptr);
 	vkDestroyShaderModule(device, fragment, nullptr);
@@ -393,11 +426,29 @@ void drawTransformSettings(SceneObject& object) {
 }
 
 void drawColorSettings(SceneObject& object) {
-	ImGui::SeparatorText("Color");
-	ImGui::ColorEdit3("Color", object.color);
-	ImGui::Checkbox("Multiply by vertex colors", &object.use_vertex_colors);
+	ImGui::SeparatorText("Texture material");
+	if (ImGui::BeginCombo("Material", materials::name(object.material))) {
+		for (int i = 0; i < materials::count; ++i) {
+			bool selected = i == object.material;
+			if (ImGui::Selectable(materials::name(i), selected)) object.material = i;
+			if (selected) ImGui::SetItemDefaultFocus();
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::ColorEdit3("Albedo tint", object.color);
+	ImGui::SliderFloat2("UV tiling", object.uv_scale, 0.25f, 8.0f);
+	ImGui::Text("Specular map: %s", materials::hasSpecular(object.material) ? "loaded" : "black fallback");
+	ImGui::Text("Emissive map: %s", materials::hasEmissive(object.material) ? "loaded" : "black fallback");
 	ImGui::ColorEdit3("Specular color", object.specular);
 	ImGui::SliderFloat("Shininess", &object.shininess, 1.0f, 256.0f);
+	ImGui::SliderFloat("Emission strength", &object.emission_strength, 0.0f, 4.0f);
+	ImGui::Checkbox("Animated sampling (push)", &object.sampling_enabled);
+	if (object.sampling_enabled) {
+		ImGui::Checkbox("Run texture animation", &object.sampling_playing);
+		ImGui::SliderFloat("Texture speed", &object.sampling_speed, 0.0f, 3.0f);
+		ImGui::SliderFloat("Effect strength", &object.sampling_strength, 0.0f, 1.0f);
+		if (ImGui::Button("Reset texture time")) object.sampling_time = 0.0f;
+	}
 }
 
 void drawAnimationSettings(SceneObject& object) {
@@ -472,10 +523,11 @@ void drawLightSettings() {
 
 void drawSceneWindow() {
 	ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_FirstUseEver);
-	ImGui::SetNextWindowSize(ImVec2(360.0f, 650.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(330.0f, 700.0f), ImGuiCond_FirstUseEver);
 	ImGui::Begin("Scene");
 	ImGui::Text("FPS: %.0f", ImGui::GetIO().Framerate);
 	ImGui::Text("Sphere mesh: %u vertices, %u triangles", vertex_count, index_count / 3);
+	ImGui::Text("Lab 3: Texture mapping");
 
 	drawProjectionSettings();
 	drawCameraSettings();
@@ -483,6 +535,15 @@ void drawSceneWindow() {
 
 	ImGui::SeparatorText("Objects");
 	ImGui::SliderInt("Object count", &object_count, 1, max_objects);
+	if (ImGui::Button("All lights off (emission demo)")) {
+		ambient_intensity = directional_intensity = 0.0f;
+		for (auto& light : point_lights) light.color_intensity[3] = 0.0f;
+		for (auto& light : spot_lights) light.color_intensity[3] = 0.0f;
+	}
+	if (ImGui::Button("Restore default lighting")) {
+		ambient_intensity = 0.15f;
+		directional_intensity = 0.8f;
+	}
 
 	ImGui::End();
 }
@@ -490,7 +551,7 @@ void drawSceneWindow() {
 void drawObjectWindow() {
 	float right_edge = ImGui::GetIO().DisplaySize.x - 10.0f;
 	ImGui::SetNextWindowPos(ImVec2(right_edge, 10.0f), ImGuiCond_FirstUseEver, ImVec2(1.0f, 0.0f));
-	ImGui::SetNextWindowSize(ImVec2(320.0f, 500.0f), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(340.0f, 800.0f), ImGuiCond_FirstUseEver);
 	ImGui::Begin("Object");
 
 	if (selected_object >= object_count) {
@@ -556,16 +617,27 @@ void drawObjects(VkCommandBuffer command_buffer) {
 
 	vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout, 0, 1, &scene_set, 0, nullptr);
 	for (int i = 0; i < object_count; i++) {
+		VkDescriptorSet material = materials::descriptorSet(objects[i].material);
+		uint32_t dynamic_offset = (uint32_t)(i * model_stride);
 		vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
-		                        1, 1, &descriptor_sets[i], 0, nullptr);
+		                        1, 1, &material, 1, &dynamic_offset);
+		SamplingPush sampling = {
+			{ objects[i].uv_scale[0], objects[i].uv_scale[1] },
+			objects[i].sampling_time, objects[i].sampling_strength,
+			objects[i].sampling_enabled ? 1 : 0, objects[i].emission_strength, { 0, 0 },
+		};
+		vkCmdPushConstants(command_buffer, pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
+		                   0, sizeof(sampling), &sampling);
 		vkCmdDrawIndexed(command_buffer, index_count, 1, 0, 0, 0);
 	}
 	if (!show_lights) return;
 	vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, marker_pipeline);
+	vkCmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, marker_pipeline_layout,
+	                        0, 1, &scene_set, 0, nullptr);
 	auto draw_marker = [&](const float* position, const float* color) {
 		MarkerPush marker = { multiply(translationMatrix(position[0], position[1], position[2]), scaleMatrix(0.12f, 0.12f, 0.12f)),
 		                      { color[0], color[1], color[2], 1.0f } };
-		vkCmdPushConstants(command_buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(marker), &marker);
+		vkCmdPushConstants(command_buffer, marker_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(marker), &marker);
 		vkCmdDrawIndexed(command_buffer, index_count, 1, 0, 0, 0);
 	};
 	for (const auto& light : point_lights) draw_marker(light.position, light.color_intensity);
@@ -574,12 +646,13 @@ void drawObjects(VkCommandBuffer command_buffer) {
 		vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, cone_pipeline);
 		vkCmdBindVertexBuffers(command_buffer, 0, 1, &cone_buffer.buffer, &vertex_offset);
 		MarkerPush marker = { identityMatrix(), { 1, 1, 1, 1 } };
-		vkCmdPushConstants(command_buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(marker), &marker);
+		vkCmdPushConstants(command_buffer, marker_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(marker), &marker);
 		vkCmdDraw(command_buffer, cone_vertex_count, 1, 0, 0);
 	}
 }
 
 bool createResources() {
+	if (!materials::initialize()) return false;
 	if (!createSphereBuffers()) {
 		return false;
 	}
@@ -624,14 +697,15 @@ void shutdown() {
 	vkDestroyPipeline(context.device, wireframe_pipeline, nullptr);
 	vkDestroyPipeline(context.device, fill_pipeline, nullptr);
 	vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
+	vkDestroyPipelineLayout(context.device, marker_pipeline_layout, nullptr);
 
 	vkDestroyDescriptorPool(context.device, descriptor_pool, nullptr);
 	vkDestroyDescriptorSetLayout(context.device, descriptor_set_layout, nullptr);
 	vkDestroyDescriptorSetLayout(context.device, scene_set_layout, nullptr);
 
-	for (int i = 0; i < max_objects; i++) {
-		graphics::destroyBuffer(uniform_buffers[i]);
-	}
+	materials::shutdown();
+	graphics::destroyBuffer(model_buffer);
+	graphics::destroyBuffer(cone_staging);
 	graphics::destroyBuffer(cone_buffer);
 	graphics::destroyBuffer(spot_buffer);
 	graphics::destroyBuffer(point_buffer);
@@ -665,13 +739,15 @@ void update(double time) {
 	scene_uniforms.directional_color[3] = directional_intensity;
 	for (int i = 0; i < object_count; i++) {
 		if (objects[i].animation_playing) objects[i].animation_time += delta_time * objects[i].animation_speed;
+		if (objects[i].sampling_enabled && objects[i].sampling_playing) {
+			objects[i].sampling_time += delta_time * objects[i].sampling_speed;
+		}
 		object_uniforms[i].model = computeModelMatrix(objects[i]);
 		for (int k = 0; k < 3; k++) {
 			object_uniforms[i].albedo[k] = objects[i].color[k];
 			object_uniforms[i].specular_shininess[k] = objects[i].specular[k];
 		}
 		object_uniforms[i].specular_shininess[3] = objects[i].shininess;
-		object_uniforms[i].options[0] = objects[i].use_vertex_colors ? 1.0f : 0.0f;
 	}
 }
 
@@ -684,7 +760,9 @@ bool ensureBuffer(graphics::Buffer& buffer, size_t& capacity, size_t count, size
 		std::cerr << "Too many lights for this GPU storage buffer\n";
 		return false;
 	}
-	graphics::Buffer replacement = graphics::createBuffer(count * element_size, usage);
+	bool device_local = (usage & VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) != 0;
+	VkBufferUsageFlags flags = usage | (device_local ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0);
+	graphics::Buffer replacement = graphics::createBuffer(count * element_size, flags, device_local);
 	if (!replacement.buffer) return false;
 	if (descriptor_binding >= 0) {
 		writeBufferDescriptor(scene_set, descriptor_binding, replacement, count * element_size, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
@@ -747,17 +825,24 @@ void render(const graphics::internal::FrameData& fd) {
 	std::vector<Vertex> cone_vertices;
 	if (show_lights) for (const auto& light : spot_lights) appendCone(cone_vertices, light);
 	bool cone_ok = ensureBuffer(cone_buffer, cone_capacity, cone_vertices.size(), sizeof(Vertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, -1);
+	cone_ok = cone_ok && ensureBuffer(cone_staging, cone_staging_capacity, cone_vertices.size(), sizeof(Vertex), VK_BUFFER_USAGE_TRANSFER_SRC_BIT, -1);
 	cone_vertex_count = cone_ok ? (uint32_t)cone_vertices.size() : 0;
-	if (cone_vertex_count) graphics::uploadToBuffer(cone_buffer, cone_vertices.data(), cone_vertices.size() * sizeof(Vertex));
+	if (cone_vertex_count && !graphics::uploadToBuffer(cone_staging, cone_vertices.data(), cone_vertices.size() * sizeof(Vertex))) {
+		cone_vertex_count = 0;
+	}
 	graphics::uploadToBuffer(scene_buffer, &scene_uniforms, sizeof(scene_uniforms));
 	for (int i = 0; i < object_count; i++) {
-		graphics::uploadToBuffer(uniform_buffers[i], &object_uniforms[i], sizeof(ObjectUniforms));
+		graphics::uploadToBuffer(model_buffer, &object_uniforms[i], sizeof(ObjectUniforms), i * model_stride);
 	}
 	const VkCommandBufferBeginInfo begin_info = {
 		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
 		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
 	};
 	vkBeginCommandBuffer(fd.command_buffer, &begin_info);
+	if (cone_vertex_count) {
+		graphics::copyBuffer(fd.command_buffer, cone_staging, cone_buffer, cone_vertices.size() * sizeof(Vertex),
+		                     VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
+	}
 	beginRenderPass(fd);
 	drawObjects(fd.command_buffer);
 	vkCmdEndRenderPass(fd.command_buffer);

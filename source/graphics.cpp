@@ -3,12 +3,14 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <cstddef>
 
 #include "mesh.hpp"
+#include "graphics_upload.hpp"
 
 namespace graphics {
 
-Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage) {
+Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage, bool device_local) {
 	const VkBufferCreateInfo buffer_info = {
 		.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
 		.size = size,
@@ -17,8 +19,9 @@ Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage) {
 	};
 
 	const VmaAllocationCreateInfo allocation_info = {
-		.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
-		.usage = VMA_MEMORY_USAGE_AUTO,
+		.flags = device_local ? 0u : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT,
+		.usage = device_local ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE : VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+		.requiredFlags = device_local ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
 	};
 
 	Buffer buffer = {};
@@ -29,8 +32,12 @@ Buffer createBuffer(VkDeviceSize size, VkBufferUsageFlags usage) {
 	return buffer;
 }
 
-void uploadToBuffer(Buffer buffer, const void* data, VkDeviceSize size) {
-	vmaCopyMemoryToAllocation(internal::context.allocator, data, buffer.allocation, 0, size);
+bool uploadToBuffer(Buffer buffer, const void* data, VkDeviceSize size, VkDeviceSize offset) {
+	if (vmaCopyMemoryToAllocation(internal::context.allocator, data, buffer.allocation, offset, size) != VK_SUCCESS) {
+		std::cerr << "Failed to write host-visible buffer\n";
+		return false;
+	}
+	return true;
 }
 
 void destroyBuffer(Buffer buffer) {
@@ -66,7 +73,8 @@ VkShaderModule createShaderModule(const char* path) {
 }
 
 VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
-                          VkShaderModule fragment_shader, VkPolygonMode polygon_mode, VkPrimitiveTopology topology) {
+                          VkShaderModule fragment_shader, VkPolygonMode polygon_mode,
+                          VkPrimitiveTopology topology, bool position_only) {
 	const VkPipelineShaderStageCreateInfo stages[2] = {
 		{
 			.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -93,19 +101,19 @@ VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
 			.location = 0,
 			.binding = 0,
 			.format = VK_FORMAT_R32G32B32_SFLOAT,
-			.offset = 0,
+			.offset = offsetof(Vertex, position),
 		},
 		{
 			.location = 1,
 			.binding = 0,
 			.format = VK_FORMAT_R32G32B32_SFLOAT,
-			.offset = 3 * sizeof(float),
+			.offset = offsetof(Vertex, normal),
 		},
 		{
 			.location = 2,
 			.binding = 0,
-			.format = VK_FORMAT_R32G32B32_SFLOAT,
-			.offset = 6 * sizeof(float),
+			.format = VK_FORMAT_R32G32_SFLOAT,
+			.offset = offsetof(Vertex, uv),
 		},
 	};
 
@@ -113,7 +121,7 @@ VkPipeline createPipeline(VkPipelineLayout layout, VkShaderModule vertex_shader,
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
 		.vertexBindingDescriptionCount = 1,
 		.pVertexBindingDescriptions = &vertex_binding,
-		.vertexAttributeDescriptionCount = 3,
+		.vertexAttributeDescriptionCount = position_only ? 1u : 3u,
 		.pVertexAttributeDescriptions = vertex_attributes,
 	};
 
